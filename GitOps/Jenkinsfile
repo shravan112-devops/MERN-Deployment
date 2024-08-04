@@ -1,77 +1,42 @@
-@Library('Shared') _
-pipeline {
-    agent {label 'Node'}
-    
-    parameters {
-        string(name: 'FRONTEND_DOCKER_TAG', defaultValue: '', description: 'Frontend Docker tag of the image built by the CI job')
-        string(name: 'BACKEND_DOCKER_TAG', defaultValue: '', description: 'Backend Docker tag of the image built by the CI job')
+pipeline{
+    agent any
+    environment{
+        SONAR_HOME= tool "Sonar"
     }
-
-    stages {
-        stage("Workspace cleanup"){
+    stages{
+        stage("Clone Code from GitHub"){
             steps{
-                script{
-                    cleanWs()
-                }
+                git url: "https://github.com/krishnaacharyaa/wanderlust.git", branch: "devops"
             }
         }
-        
-        stage('Git: Code Checkout') {
-            steps {
-                script{
-                    code_checkout("https://github.com/DevMadhup/wanderlust.git","devops")
-                }
-            }
-        }
-        
-        stage('Verify: Docker Image Tags') {
-            steps {
-                script{
-                    echo "FRONTEND_DOCKER_TAG: ${params.FRONTEND_DOCKER_TAG}"
-                    echo "BACKEND_DOCKER_TAG: ${params.BACKEND_DOCKER_TAG}"
-                }
-            }
-        }
-        
-        
-        stage("Update: Kubernetes manifests"){
+        stage("SonarQube Quality Analysis"){
             steps{
-                script{
-                    dir('kubernetes'){
-                        sh """
-                            sed -i -e 's/backend-wanderlust.*/backend-wanderlust:${params.BACKEND_DOCKER_TAG}/g' backend.yaml
-                        """
-                    }
-                    
-                    dir('kubernetes'){
-                        sh """
-                            sed -i -e 's/frontend-wanderlust.*/frontend-wanderlust:${params.FRONTEND_DOCKER_TAG}/g' frontend.yaml
-                        """
-                    }
-                    
+                withSonarQubeEnv("Sonar"){
+                    sh "$SONAR_HOME/bin/sonar-scanner -Dsonar.projectName=wanderlust -Dsonar.projectKey=wanderlust"
                 }
             }
         }
-        
-        stage("Git: Code update and push to GitHub"){
+        stage("OWASP Dependency Check"){
             steps{
-                script{
-                    withCredentials([gitUsernamePassword(credentialsId: 'Github-cred', gitToolName: 'Default')]) {
-                        sh '''
-                        echo "Checking repository status: "
-                        git status
-                        
-                        echo "Adding changes to git: "
-                        git add .
-                        
-                        echo "Commiting changes: "
-                        git commit -m "Updated environment variables"
-                        
-                        echo "Pushing changes to github: "
-                        git push https://github.com/DevMadhup/wanderlust.git devops
-                    '''
-                    }
+                dependencyCheck additionalArguments: '--scan ./', odcInstallation: 'dc'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage("Sonar Quality Gate Scan"){
+            steps{
+                timeout(time: 2, unit: "MINUTES"){
+                    waitForQualityGate abortPipeline: false
                 }
+            }
+        }
+        stage("Trivy File System Scan"){
+            steps{
+                sh "trivy fs --format  table -o trivy-fs-report.html ."
+            }
+        }
+        stage("Deploy using Docker compose"){
+            steps{
+                sh "docker-compose up -d"
             }
         }
     }
